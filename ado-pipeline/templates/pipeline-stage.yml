@@ -1,0 +1,275 @@
+###################################
+#         Requirements            #
+###################################
+# Terraform Dev Ops Plugin (Microsoft) 
+# - This plugin is built by Microsoft and allows Terraform to be used without ReplaceTokens
+# - Helps keep all secrets hidden and excluded from artifacts.
+# - https://marketplace.visualstudio.com/items?itemName=ms-devlabs.custom-terraform-tasks
+# Service Connection
+# - https://docs.microsoft.com/en-us/azure/devops/pipelines/library/service-endpoints?view=azure-devops&tabs=yaml#create-a-service-connection
+###################################
+#      Pipeline Parameters        #
+###################################
+parameters:
+##############################################################
+# To add an environment add to values. Example:
+# values:
+#   - example
+#   - dev
+#   - prod
+# - Environments are used to map to Pipeline variable files in the ado-pipeline/variables directory
+# - Each Environment must have a variables file matching the name (ado-pipeline/variables/example.yml)
+##############################################################
+  - name: 
+      environment
+    displayName: 
+      Environment
+    type:
+      string
+    values:
+        - dev
+        - prd
+
+
+  
+###################################
+#              Stages             #
+###################################
+stages:
+# ------------------------------------------------------------------------
+# Stage: Artifact: Copy, Build and Publish
+# - Copy and publish files for consumption later in the pipeline
+- stage: 
+    ${{ parameters.environment }}_artifact
+  displayName: 
+    ${{ parameters.environment }}_'Build & Verify'
+  variables:
+    - template: 
+        ./variables/${{ parameters.environment }}.yml
+  jobs:
+  - job:
+    displayName: Build & Publish Artifacts
+    steps:
+    # TODO: Add task that will check for TF folder
+      - task: CopyFiles@2
+        displayName: Copying Files
+        inputs:
+          SourceFolder: $(Build.SourcesDirectory)
+          Contents: |
+            src/terraform/**
+            ado-pipeline/templates/*.ps1
+          TargetFolder: 
+            "$(build.artifactstagingdirectory)"
+      - task: PublishBuildArtifacts@1
+        displayName: "Publish Artifact: build"
+        inputs:
+          artifactName: build
+# Stage: Artifact: Copy, Build and Publish
+# ------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------
+# Stage: Verifying Storage Account- Start
+# - Executes /ado-pipeline/templates/azure-terraform-statefile-storage-account.ps1
+# - Referenced as a tempalted task
+# - Verifies Resource Group, Storage Account and Container exist -- If not, creates
+- stage: 
+    ${{ parameters.environment }}_stateFileStorage
+  displayName: 
+    ${{ parameters.environment }}_Az Storage Account
+  dependsOn:
+    ${{ parameters.environment }}_artifact
+  variables:
+    - template: 
+        ./variables/${{ parameters.environment }}.yml
+  jobs:
+  - deployment: terraformDeployment
+    displayName: State File Storage
+    environment: ${{ parameters.environment }}
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - template: azure-terraform-statefile-storage-account.yml
+            parameters:
+              resourceGroupName: $(azureStorageAccountRgName)
+              serviceConnection: ${{ variables['serviceConnectionName'] }}
+              regionName: $(azureStorageAccountRegion)
+              storageAccountName: $(azureStorageAccountName)
+              containerName: $(azureStorageAccountContainerName)
+              SubscriptionID: $(SubscriptionID)
+              
+# Stage: Verifying Storage Account- End
+# ------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------
+# Stage: Terraform Init, Validate & Plan - Start
+# - Initializes Terraform and executes terraform plan
+# - Creates empty tfvars file if one isn't specified
+- stage: ${{ parameters.environment }}_terraformPlan
+  displayName: ${{ parameters.environment }}_TerraformPlan
+  dependsOn: ${{ parameters.environment }}_stateFileStorage
+  variables:
+    - template: 
+        ./variables/${{ parameters.environment }}.yml
+  jobs:
+  - deployment: terraformDeployment
+    displayName: Terraform Plan
+    environment: ${{ parameters.environment }}
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+
+          - download: none
+
+          - task: DownloadBuildArtifacts@0
+            displayName: Download Artifacts
+            inputs:
+              artifactName: build
+
+          - task: terraformInstaller@0
+            displayName: Terraform Install
+            inputs:
+              terraformVersion: '$(terraformVersion)'
+
+          - task: TerraformTaskV1@0
+            displayName: Terraform Init
+            inputs:
+              backendServiceArm: ${{ variables['serviceConnectionName'] }}
+              backendAzureRmResourceGroupName: $(azureStorageAccountRgName)
+              backendAzureRmStorageAccountName: $(azureStorageAccountName)
+              backendAzureRmContainerName: $(azureStorageAccountContainerName)
+              backendAzureRmKey: '$(terraformStateFileName)'
+              workingDirectory: '$(terraformWorkingDirectory)'
+
+          # PowerShell
+          # Run a PowerShell script on Linux, macOS, or Windows
+          - task: PowerShell@2
+            displayName: Checking tfVars
+            inputs:
+              targetType: 'inline'
+              #filePath: # Required when targetType == FilePath
+              #arguments: # Optional
+              script: |
+                if(!(Test-Path -Path $(terraformWorkingDirectory)/$(terraformVariableFile))) {
+                  New-Item -Path $(terraformWorkingDirectory)/$(terraformVariableFile) -ItemType File -Value "#Intentionally Blank"
+                }
+              #errorActionPreference: 'stop' # Optional. Options: stop, continue, silentlyContinue
+              #failOnStderr: false # Optional
+              #ignoreLASTEXITCODE: false # Optional
+              #pwsh: false # Optional
+              #workingDirectory: # Optional
+
+#          - pwsh: |
+#              if(!(Test-Path -Path $(terraformWorkingDirectory)/$(terraformVariableFile))) {
+#                New-Item -Path $(terraformWorkingDirectory)/$(terraformVariableFile) -ItemType File -Value "#Intentionally Blank"
+#              }
+#            displayName: Checking tfVars
+
+          - task: TerraformTaskV1@0
+            displayName: Terraform Validate
+            inputs:
+              command: 
+                validate
+              environmentServiceNameAzureRM: ${{ variables['serviceConnectionName'] }}
+              workingDirectory: '$(terraformWorkingDirectory)'
+
+          - task: TerraformTaskV1@0
+            displayName: Terraform Plan
+            inputs:
+              command: plan
+              commandOptions: '$(terraformCommandOptions)'
+              environmentServiceNameAzureRM: ${{ variables['serviceConnectionName'] }}
+              workingDirectory: '$(terraformWorkingDirectory)'
+          # Remove .terraform directory
+          # Takes less time to run INIT in the next stage than copying .terraform to the artifact
+          - script: 
+              rmdir /S /Q $(terraformWorkingDirectory)\.terraform 
+            displayName: Cleaning Files
+          - task: 
+              PublishPipelineArtifact@1
+            displayName: 
+              Publish Terraform Artifact
+            inputs:
+              targetPath:
+                $(terraformRootDirectory)
+              artifactName: 
+                terraform
+# Stage: Terraform Init, Validate & Plan - End
+# ------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------
+# Stage: Terraform Apply - Start  
+# - Stage is executed when applyChanges = true and terraformPlan does not fail    
+- stage: 
+    ${{ parameters.environment }}_applyChanges
+  displayName:
+    ${{ parameters.environment }}_Terraform Apply
+  dependsOn: ${{ parameters.environment }}_terraformPlan
+  variables:
+    - template: 
+        ./variables/${{ parameters.environment }}.yml
+  #condition:
+  #  eq(dependencies.terraformPlan.result, 'Succeeded')
+
+  jobs:
+  - deployment: 
+      terraformDeployment
+    displayName:
+      Terraform Apply
+    environment:
+      ${{ parameters.environment }}
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: 
+              none
+          - task: 
+              DownloadPipelineArtifact@2
+            displayName: 
+              Download Terraform Artifact
+            inputs: 
+              artifactName: 
+                terraform
+              path: 
+                $(Pipeline.Workspace)/terraform
+          - task: 
+              terraformInstaller@0
+            displayName:
+              Terraform Install
+            inputs:
+              terraformVersion: 
+                '$(terraformVersion)'
+          - task: 
+              TerraformTaskV1@0
+            displayName:
+              Terraform Init
+            inputs:
+              backendServiceArm:
+                ${{ variables['serviceConnectionName'] }}
+              backendAzureRmResourceGroupName:
+                $(azureStorageAccountRgName)
+              backendAzureRmStorageAccountName:
+                $(azureStorageAccountName)
+              backendAzureRmContainerName:
+                $(azureStorageAccountContainerName)
+              backendAzureRmKey: 
+                '$(terraformStateFileName)'
+              workingDirectory: 
+                '$(Pipeline.Workspace)/terraform'
+          - task: 
+              TerraformTaskV1@0
+            displayName:
+              Terraform Apply
+            inputs:
+              command: 
+                apply
+              commandOptions: 
+                $(terraformPlanName)
+              environmentServiceNameAzureRM:
+                ${{ variables['serviceConnectionName'] }}
+              workingDirectory:
+                '$(Pipeline.Workspace)/terraform'
+# Stage: Terraform Apply - End
+# ------------------------------------------------------------------------

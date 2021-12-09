@@ -1,0 +1,41 @@
+###################################
+#         Requirements            #
+###################################
+# Terraform Dev Ops Plugin (Microsoft) 
+# - This plugin is built by Microsoft and allows Terraform to be used without ReplaceTokens
+# - Helps keep all secrets hidden and excluded from artifacts.
+# - https://marketplace.visualstudio.com/items?itemName=ms-devlabs.custom-terraform-tasks
+# Service Connection
+# - https://docs.microsoft.com/en-us/azure/devops/pipelines/library/service-endpoints?view=azure-devops&tabs=yaml#create-a-service-connection
+
+###################################
+#       Pipeline Triggers         #
+###################################
+# More information on how to set triggers for CI
+# - https://docs.microsoft.com/en-us/azure/devops/pipelines/repos/azure-repos-git?view=azure-devops&tabs=yaml#ci-triggers
+# - Pipeline defaults to 'none'
+trigger:
+  branches:
+    include:
+    - main
+# Information displayed on pipeline history
+# - environment_branch_date_version_apply_true/false
+# - example: dev_main_20201023.3_Apply_true
+name: policy_$(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
+# ------------------------------------------------------------------------
+
+###################################
+#              Stages             #
+###################################
+stages:
+
+  #deploy infra dev - This stage will remove the do not delete locks on the resource groups so changes can be made. 
+  - template: templates/pipeline-stage.yml
+    parameters:
+      environment: prd
+
+
+
+
+# Stage: Terraform Apply - End
+# ------------------------------------------------------------------------
